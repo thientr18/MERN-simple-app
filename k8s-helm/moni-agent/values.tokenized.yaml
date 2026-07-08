@@ -1,0 +1,136 @@
+moni-agent:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: "__crServer__/moni-agent"
+    tag: BuildID
+    pullPolicy: IfNotPresent
+
+  imagePullSecrets:
+    - name: regcred
+
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 80
+    targetPort: 8000
+    name: http
+
+  ingress:
+    enabled: true
+    className: "nginx"
+    host: "moni-agent.wecopytrade.com"
+    tlsSecret: "wecopytrade"
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1024Mi"
+
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                  - linux
+
+  env:
+    # =========================================================================
+    # NON-SECRET config — set directly here (safe to commit).
+    # Values not listed below fall back to defaults in metrics_service/config.py
+    # (node_name, auth_type, description, timeout, max_results, ranges, etc.).
+    # =========================================================================
+
+    # In-cluster Prometheus
+    - name: PROMETHEUS_NODE_URL
+      value: "http://192.168.100.230:9090"
+    - name: PROMETHEUS_NODE_USERNAME
+      value: "admin"
+
+    # Azure Monitor Managed Prometheus
+    - name: PROMETHEUS_AKS_URL
+      value: "https://uat-monitor-workspace-z91u.canadacentral.prometheus.monitor.azure.com"
+    - name: PROMETHEUS_AKS_TENANT_ID
+      value: "7eb270e6-7c74-4159-a883-ca73dd7f5868"
+    - name: PROMETHEUS_AKS_CLIENT_ID
+      value: "c611f642-d3b2-4eae-98ff-cefe2abae8c0"
+    - name: PROMETHEUS_AKS_SUBSCRIPTION_ID
+      value: "753d40c4-040a-435d-98b1-8b6236a4e873"
+
+    # Daily report scope
+    - name: DAILY_REPORT_SOURCES
+      value: "Prometheus,uat-monitor-workspace-prometheus"
+    - name: DAILY_REPORT_NAMESPACES
+      value: "default,kube-system,monitoring"
+
+    # Azure Monitor REST API (App Service, MySQL, PostgreSQL metrics)
+    - name: AZURE_RESOURCE_NAME
+      value: "uat-monitor-workspace"
+    - name: AZURE_RESOURCE_TENANT_ID
+      value: "7eb270e6-7c74-4159-a883-ca73dd7f5868"
+    - name: AZURE_RESOURCE_CLIENT_ID
+      value: "c611f642-d3b2-4eae-98ff-cefe2abae8c0"
+    - name: AZURE_RESOURCE_SUBSCRIPTION_ID
+      value: "753d40c4-040a-435d-98b1-8b6236a4e873"
+
+    # Anthropic model (override code default claude-sonnet-4-6 -> haiku)
+    # Dùng model ID đầy đủ có hậu tố ngày; alias "claude-haiku-4-5" có thể gây 400.
+    - name: ANTHROPIC_MODEL
+      value: "claude-haiku-4-5-20251001"
+
+    # Static
+    - name: ALERT_RETENTION_DAYS
+      value: "90"
+
+    # =========================================================================
+    # SECRETS — keep as tokens, supplied by ADO variable group (do NOT hardcode).
+    # These are the ONLY variables the variable group still needs.
+    # =========================================================================
+    - name: PROMETHEUS_NODE_PASSWORD
+      value: "__PROMETHEUS_NODE_PASSWORD__"
+    - name: PROMETHEUS_AKS_CLIENT_SECRET
+      value: "__PROMETHEUS_AKS_CLIENT_SECRET__"
+    - name: AZURE_RESOURCE_CLIENT_SECRET
+      value: "__AZURE_RESOURCE_CLIENT_SECRET__"
+    - name: ANTHROPIC_API_KEY
+      value: "__ANTHROPIC_API_KEY__"
+    - name: TEAMS_WEBHOOK_URL
+      value: "__TEAMS_WEBHOOK_URL__"
+    - name: TEAMS_OUTGOING_WEBHOOK_SECRET
+      value: "__TEAMS_OUTGOING_WEBHOOK_SECRET__"
+    - name: TEAMS_ALERT_WEBHOOK_URL
+      value: "__TEAMS_ALERT_WEBHOOK_URL__"
+    - name: ALERT_WEBHOOK_TOKEN
+      value: "__ALERT_WEBHOOK_TOKEN__"
+    # PostgreSQL alert storage — pulled from the existing moni-agent-db Secret
+    # (no password duplication, no variable-group entry needed).
+    - name: DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: moni-agent-db-secret
+          key: DATABASE_URL
