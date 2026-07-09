@@ -1,0 +1,44 @@
+name: Trigger Azure CD
+
+# CI→CD handoff: after images are pushed, queue the Azure DevOps CD pipeline
+# and pass the git SHA so CD deploys the exact image that was just built.
+on:
+  workflow_run:
+    workflows: ["Build and Push Images"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  trigger-cd:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Queue Azure DevOps CD pipeline
+        env:
+          AZDO_PAT: ${{ secrets.AZDO_PAT }}
+          AZDO_ORG_URL: ${{ vars.AZDO_ORG_URL }}
+          AZDO_PROJECT: ${{ vars.AZDO_PROJECT }}
+          AZDO_PIPELINE_ID: ${{ vars.AZDO_PIPELINE_ID }}
+          AZDO_PIPELINE_BRANCH: ${{ vars.AZDO_PIPELINE_BRANCH }}
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          for v in AZDO_PAT AZDO_ORG_URL AZDO_PROJECT AZDO_PIPELINE_ID; do
+            [ -n "${!v:-}" ] || { echo "::error::$v is empty"; exit 1; }
+          done
+
+          # Pin the pipeline's source branch only when AZDO_PIPELINE_BRANCH is set.
+          resources=""
+          if [ -n "${AZDO_PIPELINE_BRANCH:-}" ]; then
+            resources=",\"resources\":{\"repositories\":{\"self\":{\"refName\":\"${AZDO_PIPELINE_BRANCH}\"}}}"
+          fi
+
+          echo "Queueing CD: imageTag=${IMAGE_TAG} branch=${AZDO_PIPELINE_BRANCH:-<pipeline default>}"
+          code=$(curl -sS -o response.json -w '%{http_code}' \
+            -u ":${AZDO_PAT}" -H "Content-Type: application/json" -X POST \
+            "${AZDO_ORG_URL}/${AZDO_PROJECT}/_apis/pipelines/${AZDO_PIPELINE_ID}/runs?api-version=7.1" \
+            -d "{\"templateParameters\":{\"imageTag\":\"${IMAGE_TAG}\"}${resources}}")
+
+          cat response.json
+          [ "$code" -lt 300 ] || { echo "::error::Queue failed (HTTP $code)"; exit 1; }

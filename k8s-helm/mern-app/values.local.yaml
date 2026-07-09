@@ -1,16 +1,17 @@
-# =============================================================================
-# Complete values for MANUAL local testing (step: "test Helm before CI/CD").
-# No tokens — deploy directly:
+# Local testing values (no tokens). Same secret model as CD: secrets come from
+# the mern-app-secrets Secret. See RUNBOOK-cicd-vbox.md §4 for the full flow.
 #
+# One-time setup, then deploy:
+#   kubectl create namespace mern-app
+#   kubectl create secret generic mern-app-secrets -n mern-app \
+#     --from-literal=JWT_SECRET='local-dev-secret-change-me' \
+#     --from-literal=MONGO_URI='mongodb://mern-app-mongodb:27017/mern-app'
 #   helm upgrade --install mern-app ./k8s-helm/mern-app \
-#     --namespace mern-app --create-namespace \
-#     -f ./k8s-helm/mern-app/values.local.yaml
+#     --namespace mern-app -f ./k8s-helm/mern-app/values.local.yaml
 #
-# Assumes images were built locally and loaded into the cluster:
+# Images must be built and loaded onto the node first (pullPolicy: Never):
 #   docker build -t web-app-mern:backend-local .
 #   docker build -t web-app-mern:frontend-local ./client
-# (see RUNBOOK-cicd-vbox.md §4 for loading images into minikube/kind/containerd)
-# =============================================================================
 
 backend:
   enabled: true
@@ -58,12 +59,17 @@ backend:
   env:
     - name: PORT
       value: "4000"
-    # Points at the in-cluster mongodb service rendered by this chart
-    # (<release>-mongodb). Release name "mern-app" -> mern-app-mongodb.
+    # Secrets from the mern-app-secrets Secret (created once, see header).
     - name: MONGO_URI
-      value: "mongodb://mern-app-mongodb:27017/mern-app"
+      valueFrom:
+        secretKeyRef:
+          name: mern-app-secrets
+          key: MONGO_URI
     - name: JWT_SECRET
-      value: "local-dev-secret-change-me"
+      valueFrom:
+        secretKeyRef:
+          name: mern-app-secrets
+          key: JWT_SECRET
 
 frontend:
   enabled: true

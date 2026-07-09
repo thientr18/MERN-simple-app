@@ -1,0 +1,18 @@
+# Normalize text files: LF in the repository, auto-detect on checkout.
+* text=auto
+
+# Files that RUN on Linux (CI runners, ADO agent, containers) must be LF.
+# CRLF here breaks embedded shell (e.g. $'\r': command not found).
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.sh        text eol=lf
+*.tpl       text eol=lf
+Dockerfile  text eol=lf
+*.json      text eol=lf
+*.js        text eol=lf
+*.md        text eol=lf
+
+# Binary files: never touch line endings.
+*.png binary
+*.jpg binary
+*.ico binary

@@ -1,14 +1,7 @@
-# =============================================================================
-# Tokenized values for CD — DO NOT deploy this file directly.
-# The Azure DevOps pipeline replaces the tokens below before `helm upgrade`:
-#   __crServer__      -> container registry / Docker Hub namespace (e.g. thientran03)
-#   BuildID           -> $(Build.BuildId) of the pipeline run
-#   __ingressHost__   -> public hostname of the app (e.g. mern.local)
-#   __MONGO_URI__     -> MongoDB connection string   (secret, from variable group)
-#   __JWT_SECRET__    -> JWT signing secret          (secret, from variable group)
-# Image naming follows the existing GitHub CI convention: one repository
-# (web-app-mern) with backend-<id> / frontend-<id> tags.
-# =============================================================================
+# CD values — the pipeline replaces the tokens below, then runs helm upgrade.
+# Tokens (non-secret): __crServer__, __IMAGE_TAG__ (git SHA from CI), __ingressHost__.
+# Secrets are NOT here — JWT_SECRET/MONGO_URI come from the mern-app-secrets
+# k8s Secret (see backend.env). Do not deploy this file directly.
 
 backend:
   enabled: true
@@ -16,7 +9,7 @@ backend:
 
   image:
     repository: "__crServer__/web-app-mern"
-    tag: backend-BuildID
+    tag: backend-__IMAGE_TAG__
     pullPolicy: IfNotPresent
 
   # Uncomment when pulling from a private registry (create the secret first):
@@ -57,20 +50,19 @@ backend:
       memory: "512Mi"
 
   env:
-    # ------------------------------------------------------------------
-    # NON-SECRET config — safe to commit.
-    # ------------------------------------------------------------------
     - name: PORT
       value: "4000"
-
-    # ------------------------------------------------------------------
-    # SECRETS — keep as tokens, supplied by the ADO variable group
-    # (mern-app-<env>). Do NOT hardcode real values here.
-    # ------------------------------------------------------------------
+    # Secrets from the mern-app-secrets Secret (never in git or the pipeline).
     - name: MONGO_URI
-      value: "__MONGO_URI__"
+      valueFrom:
+        secretKeyRef:
+          name: mern-app-secrets
+          key: MONGO_URI
     - name: JWT_SECRET
-      value: "__JWT_SECRET__"
+      valueFrom:
+        secretKeyRef:
+          name: mern-app-secrets
+          key: JWT_SECRET
 
 frontend:
   enabled: true
@@ -78,7 +70,7 @@ frontend:
 
   image:
     repository: "__crServer__/web-app-mern"
-    tag: frontend-BuildID
+    tag: frontend-__IMAGE_TAG__
     pullPolicy: IfNotPresent
 
   service:
@@ -114,8 +106,8 @@ frontend:
       cpu: "200m"
       memory: "128Mi"
 
-# In-cluster MongoDB for the vbox cluster. Set enabled: false and point
-# __MONGO_URI__ at MongoDB Atlas / an external server if preferred.
+# In-cluster MongoDB. Set enabled: false and repoint MONGO_URI (in the Secret)
+# to use MongoDB Atlas or an external server instead.
 mongodb:
   enabled: true
   replicaCount: 1
@@ -156,9 +148,7 @@ mongodb:
       cpu: "500m"
       memory: "512Mi"
 
-  # WARNING: emptyDir loses data when the pod is rescheduled. Fine for
-  # dev/test on the vbox cluster; switch to a PersistentVolumeClaim for
-  # anything that must survive restarts (see RUNBOOK-cicd-vbox.md).
+  # emptyDir = data lost on reschedule (OK for dev/test; use a PVC to persist).
   volumeMounts:
     - name: data
       mountPath: /data/db

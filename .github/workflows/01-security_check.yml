@@ -9,7 +9,6 @@ on:
 jobs:
   backend-security-check:
     name: Backend security check
-    environment: ENV
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
