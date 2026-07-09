@@ -1,20 +1,20 @@
-{{- define "deploy-bot.deployment" -}}
+{{- define "mern-app.deployment" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "deploy-bot.fullname" . }}-{{ .name }}
+  name: {{ include "mern-app.fullname" . }}-{{ .name }}
   labels:
-    {{- include "deploy-bot.labels" . | nindent 4 }}
+    {{- include "mern-app.labels" . | nindent 4 }}
 spec:
   replicas: {{ .config.replicaCount | default 1 }}
   revisionHistoryLimit: {{ .config.revisionHistoryLimit | default 3 }}
   selector:
     matchLabels:
-      {{- include "deploy-bot.selectorLabels" . | nindent 6 }}
+      {{- include "mern-app.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "deploy-bot.selectorLabels" . | nindent 8 }}
+        {{- include "mern-app.selectorLabels" . | nindent 8 }}
     spec:
       containers:
         - name: {{ .name }}
@@ -50,6 +50,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .config.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- with .config.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -69,6 +73,10 @@ spec:
       {{- end }}
       {{- with .config.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .config.volumes }}
+      volumes:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}

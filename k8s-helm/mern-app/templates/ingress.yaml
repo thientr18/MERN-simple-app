@@ -1,0 +1,40 @@
+{{- $ing := .Values.ingress -}}
+{{- if and $ing $ing.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mern-app.fullname" . }}
+  labels:
+    {{- include "mern-app.labels" (dict "Values" .Values "Release" .Release "Chart" .Chart "name" .Chart.Name) | nindent 4 }}
+  annotations:
+    {{- if $ing.tlsSecret }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    {{- else }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    {{- end }}
+    {{- if $ing.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ $ing.clusterIssuer | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $ing.className | default "nginx" }}
+  {{- if $ing.tlsSecret }}
+  tls:
+    - hosts:
+        - {{ $ing.host }}
+      secretName: {{ $ing.tlsSecret }}
+  {{- end }}
+  rules:
+    - host: {{ $ing.host }}
+      http:
+        paths:
+          {{- range $p := $ing.paths }}
+          {{- $compCfg := index $.Values $p.component }}
+          - path: {{ $p.path }}
+            pathType: {{ $p.pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ include "mern-app.fullname" $ }}-{{ $p.component }}
+                port:
+                  number: {{ $p.port | default $compCfg.service.port }}
+          {{- end }}
+{{- end }}

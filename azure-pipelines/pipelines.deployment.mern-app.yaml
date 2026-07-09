@@ -1,0 +1,184 @@
+# =============================================================================
+# MERN App — CI/CD to a VirtualBox k8s cluster via an Azure DevOps
+# SELF-HOSTED agent (see RUNBOOK-cicd-vbox.md).
+#
+# Adapted from MoniAgent's pipelines.deployment.moni-agent.yaml. MoniAgent
+# extended a shared template (DevOps/Pipeline_Templates) that deployed to AKS
+# through a cloud service connection. Here the Build/Deploy stages are inlined
+# because the target is an on-prem VirtualBox cluster that only the
+# self-hosted agent can reach — no cloud service connection exists.
+#
+# Prerequisites on the agent VM: docker, helm, kubectl + kubeconfig for the
+# vbox cluster, and the agent registered in the pool named below.
+#
+# Variable group "mern-app-dev" must define:
+#   CR_SERVER     — registry namespace, e.g. Docker Hub username (thientran03)
+#                   or a private registry host (192.168.56.10:5000)
+#   CR_USERNAME   — registry login user
+#   CR_PASSWORD   — registry login password/token          (mark as secret)
+#   INGRESS_HOST  — app hostname, e.g. mern.local
+#   MONGO_URI     — Mongo connection string                (mark as secret)
+#                   in-cluster default: mongodb://mern-app-mongodb:27017/mern-app
+#   JWT_SECRET    — JWT signing secret                     (mark as secret)
+# =============================================================================
+
+name: MERN App - $(Build.BuildId)
+
+trigger:
+  branches:
+    include:
+      - main
+
+parameters:
+  - name: AgentPool
+    displayName: Self-hosted agent pool (vbox VM)
+    type: string
+    default: 'vbox-k8s'
+  - name: ServiceName            # helm release name
+    type: string
+    default: 'mern-app'
+  - name: ImageName              # single repo, backend-/frontend- prefixed tags
+    type: string                 # (same convention as .github/workflows/02)
+    default: 'web-app-mern'
+  - name: Namespace
+    type: string
+    default: 'mern-app'
+  - name: BackendDockerfilePath
+    type: string
+    default: 'Dockerfile'
+  - name: BackendDockerContext
+    type: string
+    default: '.'
+  - name: FrontendDockerfilePath
+    type: string
+    default: 'client/Dockerfile'
+  - name: FrontendDockerContext
+    type: string
+    default: 'client'
+  - name: isBuildStage
+    type: boolean
+    default: true
+  - name: isDeployK8s
+    type: boolean
+    default: true
+
+variables:
+  - group: mern-app-dev
+  - name: helmChartPath
+    value: 'k8s-helm/mern-app'
+  - name: valuesTokenized
+    value: 'k8s-helm/mern-app/values.tokenized.yaml'
+
+stages:
+  # ===========================================================================
+  # STAGE 1 — Build & push backend + frontend images, tagged with BuildId
+  # ===========================================================================
+  - stage: Build
+    displayName: Build and push images
+    condition: eq('${{ parameters.isBuildStage }}', 'true')
+    jobs:
+      - job: BuildPush
+        displayName: docker build & push
+        pool:
+          name: ${{ parameters.AgentPool }}
+        steps:
+          - checkout: self
+            clean: true
+
+          - bash: |
+              set -euo pipefail
+              # CR_SERVER with a dot/colon is a private registry host; a plain
+              # name (Docker Hub username) means log in to docker.io.
+              case "$(CR_SERVER)" in
+                *.*|*:*) LOGIN_SERVER="$(CR_SERVER)" ;;
+                *)       LOGIN_SERVER="docker.io"    ;;
+              esac
+              echo "$CR_PASSWORD" | docker login "$LOGIN_SERVER" -u "$(CR_USERNAME)" --password-stdin
+            displayName: Docker login
+            env:
+              CR_PASSWORD: $(CR_PASSWORD)   # secrets must be mapped explicitly
+
+          - bash: |
+              set -euo pipefail
+              IMAGE="$(CR_SERVER)/${{ parameters.ImageName }}"
+              docker build -f "${{ parameters.BackendDockerfilePath }}" \
+                -t "$IMAGE:backend-$(Build.BuildId)" \
+                -t "$IMAGE:backend-latest" \
+                "${{ parameters.BackendDockerContext }}"
+              docker push "$IMAGE:backend-$(Build.BuildId)"
+              docker push "$IMAGE:backend-latest"
+            displayName: Build & push backend image
+
+          - bash: |
+              set -euo pipefail
+              IMAGE="$(CR_SERVER)/${{ parameters.ImageName }}"
+              docker build -f "${{ parameters.FrontendDockerfilePath }}" \
+                -t "$IMAGE:frontend-$(Build.BuildId)" \
+                -t "$IMAGE:frontend-latest" \
+                "${{ parameters.FrontendDockerContext }}"
+              docker push "$IMAGE:frontend-$(Build.BuildId)"
+              docker push "$IMAGE:frontend-latest"
+            displayName: Build & push frontend image
+
+  # ===========================================================================
+  # STAGE 2 — Replace tokens in values.tokenized.yaml, then helm upgrade
+  # ===========================================================================
+  - stage: Deploy
+    displayName: Helm deploy to vbox cluster
+    dependsOn: Build
+    # run even when Build was skipped (isBuildStage=false redeploys)
+    condition: and(eq('${{ parameters.isDeployK8s }}', 'true'), in(dependencies.Build.result, 'Succeeded', 'Skipped'))
+    jobs:
+      - job: HelmDeploy
+        displayName: token replace + helm upgrade
+        pool:
+          name: ${{ parameters.AgentPool }}
+        steps:
+          - checkout: self
+            clean: true
+
+          - bash: |
+              set -euo pipefail
+              OUT="$(Build.ArtifactStagingDirectory)/values.generated.yaml"
+              # NOTE: '|' is the sed delimiter — it must not appear inside any
+              # replacement value (unlikely in URIs/secrets, but keep in mind).
+              sed -e "s|__crServer__|$(CR_SERVER)|g" \
+                  -e "s|BuildID|$(Build.BuildId)|g" \
+                  -e "s|__ingressHost__|$(INGRESS_HOST)|g" \
+                  -e "s|__MONGO_URI__|${MONGO_URI}|g" \
+                  -e "s|__JWT_SECRET__|${JWT_SECRET}|g" \
+                  "$(valuesTokenized)" > "$OUT"
+
+              if grep -nE '__[A-Za-z0-9_]+__' "$OUT"; then
+                echo "##[error]Unreplaced tokens remain in values file (see lines above)."
+                exit 1
+              fi
+              echo "Token replacement OK -> $OUT"
+            displayName: Replace tokens in Helm values
+            env:
+              MONGO_URI: $(MONGO_URI)
+              JWT_SECRET: $(JWT_SECRET)
+
+          - bash: |
+              set -euo pipefail
+              VALUES="$(Build.ArtifactStagingDirectory)/values.generated.yaml"
+
+              helm lint "$(helmChartPath)" -f "$VALUES"
+
+              helm upgrade --install "${{ parameters.ServiceName }}" "$(helmChartPath)" \
+                --namespace "${{ parameters.Namespace }}" --create-namespace \
+                -f "$VALUES" \
+                --history-max 5 \
+                --wait --timeout 5m
+
+              kubectl get pods -n "${{ parameters.Namespace }}" \
+                -l app.kubernetes.io/instance=${{ parameters.ServiceName }} -o wide
+              helm history "${{ parameters.ServiceName }}" -n "${{ parameters.Namespace }}" --max 5
+            displayName: helm upgrade --install
+
+          - bash: |
+              set -euo pipefail
+              # generated values contain real secrets — never leave them on disk
+              rm -f "$(Build.ArtifactStagingDirectory)/values.generated.yaml"
+            displayName: Clean up generated values
+            condition: always()

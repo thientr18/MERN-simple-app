@@ -25,7 +25,7 @@ jobs:
         run: npm ci
 
       - name: Run security check
-        run: npm audit --audit-level=low 
+        run: npm audit --audit-level=high 
 
 
   frontend-lint-and-build:

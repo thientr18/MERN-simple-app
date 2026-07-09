@@ -1,0 +1,171 @@
+# =============================================================================
+# Complete values for MANUAL local testing (step: "test Helm before CI/CD").
+# No tokens — deploy directly:
+#
+#   helm upgrade --install mern-app ./k8s-helm/mern-app \
+#     --namespace mern-app --create-namespace \
+#     -f ./k8s-helm/mern-app/values.local.yaml
+#
+# Assumes images were built locally and loaded into the cluster:
+#   docker build -t web-app-mern:backend-local .
+#   docker build -t web-app-mern:frontend-local ./client
+# (see RUNBOOK-cicd-vbox.md §4 for loading images into minikube/kind/containerd)
+# =============================================================================
+
+backend:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: "web-app-mern"
+    tag: backend-local
+    # Never = use only the image already loaded on the node (no registry pull)
+    pullPolicy: Never
+
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 80
+    targetPort: 4000
+    name: http
+
+  livenessProbe:
+    httpGet:
+      path: /api/v1/health
+      port: 4000
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /api/v1/health
+      port: 4000
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  env:
+    - name: PORT
+      value: "4000"
+    # Points at the in-cluster mongodb service rendered by this chart
+    # (<release>-mongodb). Release name "mern-app" -> mern-app-mongodb.
+    - name: MONGO_URI
+      value: "mongodb://mern-app-mongodb:27017/mern-app"
+    - name: JWT_SECRET
+      value: "local-dev-secret-change-me"
+
+frontend:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: "web-app-mern"
+    tag: frontend-local
+    pullPolicy: Never
+
+  service:
+    enabled: true
+    # NodePort lets you open the SPA without ingress: http://<node-ip>:30080
+    # NOTE: without ingress the SPA cannot reach the API (it calls relative
+    # /api/v1/... URLs) — use the ingress for full end-to-end testing.
+    type: NodePort
+    port: 80
+    targetPort: 80
+    nodePort: 30080
+    name: http
+
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 80
+    initialDelaySeconds: 5
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 80
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+mongodb:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: mongo
+    tag: "7.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 27017
+    targetPort: 27017
+    name: mongo
+
+  livenessProbe:
+    tcpSocket:
+      port: 27017
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    tcpSocket:
+      port: 27017
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  volumeMounts:
+    - name: data
+      mountPath: /data/db
+  volumes:
+    - name: data
+      emptyDir: {}
+
+ingress:
+  enabled: true
+  className: "nginx"
+  # Add "<node-ip>  mern.local" to your hosts file, then open http://mern.local
+  host: "mern.local"
+  tlsSecret: ""
+  paths:
+    - path: /api
+      component: backend
+    - path: /
+      component: frontend

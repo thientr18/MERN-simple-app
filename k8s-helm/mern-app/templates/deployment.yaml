@@ -1,0 +1,8 @@
+{{- $components := list "backend" "frontend" "mongodb" -}}
+{{- range $name := $components }}
+{{- $config := index $.Values $name -}}
+{{- if and $config $config.enabled }}
+---
+{{ include "mern-app.deployment" (dict "Values" $.Values "Release" $.Release "Chart" $.Chart "name" $name "config" $config) }}
+{{- end }}
+{{- end }}
