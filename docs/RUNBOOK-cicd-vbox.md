@@ -166,6 +166,7 @@ push, then "Build and Push Images" follows it and pushes
 Day-to-day: commit on `side-branch`, then
 `git push origin side-branch` (company ADO) and
 `git push github side-branch:main` (your GitHub, triggers Actions).
+Full two-remote reference: [docs/git-push-workflow.md](docs/git-push-workflow.md).
 
 **VM networking:** give the VM a **Bridged** or **Host-only + NAT** adapter so
 that (a) the VM has outbound internet (to poll Azure DevOps and pull images),
