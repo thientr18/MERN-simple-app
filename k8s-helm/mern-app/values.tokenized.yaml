@@ -12,9 +12,11 @@ backend:
     tag: backend-__IMAGE_TAG__
     pullPolicy: IfNotPresent
 
-  # Uncomment when pulling from a private registry (create the secret first):
-  # imagePullSecrets:
-  #   - name: regcred
+  # The Docker Hub repo is private — nodes authenticate with the regcred
+  # Secret, which the pipeline creates/refreshes on every deploy (§3.1 for
+  # the manual bring-up copy).
+  imagePullSecrets:
+    - name: regcred
 
   service:
     enabled: true
@@ -72,6 +74,9 @@ frontend:
     repository: "__crServer__/web-app-mern"
     tag: frontend-__IMAGE_TAG__
     pullPolicy: IfNotPresent
+
+  imagePullSecrets:
+    - name: regcred
 
   service:
     enabled: true
