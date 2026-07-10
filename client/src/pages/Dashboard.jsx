@@ -42,10 +42,13 @@ const Dashboard = () => {
 
   return (
     <div className='dashboard-main'>
-      <h1>Dashboard</h1>
-      <p className="deploy-badge">🚀 Deployed: { buildTime }</p>
-      <p>Hi { data.msg }! { data.luckyNumber }</p>
+      <h1>Dashboard</h1><br />
+      <p>{ data.msg }! { data.luckyNumber }</p><br />
       <Link to="/logout" className="logout-button">Logout</Link>
+      <br />
+      <br />
+      <br />
+      <p className="deploy-badge">🚀 Deployed: { buildTime }</p>
     </div>
   )
 }
