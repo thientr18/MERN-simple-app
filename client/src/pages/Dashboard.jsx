@@ -3,6 +3,7 @@ import "../styles/Dashboard.css";
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import axios from 'axios';
+import ProfileBadge from "../components/ProfileBadge";
 
 const Dashboard = () => {
   const [ token ] = useState(JSON.parse(localStorage.getItem("auth")) || "");
@@ -36,11 +37,17 @@ const Dashboard = () => {
     fetchLuckyNumber();
   }, [token, navigate, fetchLuckyNumber]);
 
+  const displayName = data.msg && data.msg.includes(",") ? data.msg.split(',').pop().trim() : (data.msg || 'User');
+
   return (
     <div className='dashboard-main'>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginBottom: 16 }}>
+        <ProfileBadge name={displayName} />
+        <Link to="/logout" className="logout-button">Logout</Link>
+      </div>
+
       <h1>{ data.msg }!</h1>
-      <p>Your lucky number is: { data.luckyNumber }</p>
-      <Link to="/logout" className="logout-button">Logout</Link>
+      <p>{ data.luckyNumber }</p>
     </div>
   )
 }
