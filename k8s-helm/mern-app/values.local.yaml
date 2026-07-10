@@ -1,5 +1,5 @@
 # Local testing values (no tokens). Same secret model as CD: secrets come from
-# the mern-app-secrets Secret. See RUNBOOK-cicd-vbox.md §4 for the full flow.
+# the mern-app-secrets Secret. See ../../README.md §3.3 for the full flow.
 #
 # One-time setup, then deploy:
 #   kubectl create namespace mern-app
