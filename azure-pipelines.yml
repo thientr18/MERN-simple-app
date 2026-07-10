@@ -3,7 +3,6 @@ name: MERN CICD - $(Build.BuildId)
 trigger:
   branches:
     include:
-      - main
       - side-branch
   paths:
     exclude:
