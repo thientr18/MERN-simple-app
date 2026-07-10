@@ -1,31 +1,39 @@
-# MERN App — CI/CD to a VirtualBox Kubernetes Cluster
+# MERN App — Full CI/CD on Azure DevOps to a VirtualBox Kubernetes Cluster
 
 This repo ships a MERN app (React + Express + MongoDB) to a self-hosted
-Kubernetes cluster running in VirtualBox. **CI builds, CD deploys** — the two
-halves live in different systems and hand off through a single image tag.
+Kubernetes cluster running in VirtualBox. **One Azure DevOps pipeline does the
+whole job** — security check, build & push images, then deploy — all on a
+self-hosted agent that lives *inside* the cluster network.
 
-- **CI — GitHub Actions:** security check → build images → push to Docker Hub →
-  trigger CD.
-- **CD — Azure DevOps** (self-hosted agent on the cluster master): `helm upgrade`
-  with the exact image tag CI just built. Runs only after CI succeeds.
-- **App secrets** (`JWT_SECRET`, `MONGO_URI`) live in a Kubernetes Secret — never
-  in git or the pipeline.
+- **CI/CD — Azure DevOps** (self-hosted agent on the cluster master), one
+  pipeline, three gated stages:
+  1. **Security check** — backend `npm audit`, frontend lint + build.
+  2. **Build & push** — build backend + frontend images, push to Docker Hub
+     tagged `backend-<sha>` / `frontend-<sha>`.
+  3. **Deploy** — `helm upgrade` with the exact `<sha>` just built. Runs only if
+     the first two stages pass.
+- **No secrets in git** — the Docker token is a secret variable in the ADO variable
+  group; app secrets live in a k8s Secret (see **Config & secrets** below).
 
 ```mermaid
 flowchart LR
-    P["push → main"] --> S["01 Security Check"]
-    S -->|ok| B["02 Build + Push<br/>backend-&lt;sha&gt; / frontend-&lt;sha&gt;"]
-    B -->|ok| T["03 Trigger CD<br/>REST, imageTag=&lt;sha&gt;"]
+    P["push → Azure Repos"] --> S["Stage 1<br/>Security check"]
+    S -->|ok| B["Stage 2 · Build & push<br/>backend-&lt;sha&gt; / frontend-&lt;sha&gt;"]
+    B -->|ok| D["Stage 3<br/>helm upgrade (sha)"]
     B --> H[("Docker Hub")]
-    T --> CD["Azure CD (agent on master)<br/>helm upgrade"]
-    H -. pull .-> CD
-    CD --> K["vbox cluster"]
+    H -. pull .-> K["vbox cluster"]
+    D --> K
 ```
 
-**Why two systems?** GitHub Actions is the easiest place to build and push public
-images; the vbox cluster has no public endpoint, so a self-hosted Azure DevOps
-agent *inside* the network does the deploy. GitHub never touches the cluster; the
-agent never builds images.
+**Why a self-hosted agent for everything?** The vbox cluster has no public
+endpoint, so the deploy has to run from a machine inside the network. That same
+agent (on the master) also has Docker, so it builds and pushes the images too —
+no external CI system needs to reach the cluster, and no cluster credentials ever
+leave the network.
+
+> **GitHub Actions were removed.** Earlier this repo split CI (GitHub) from CD
+> (Azure DevOps) and handed off via a REST call. That is gone — Azure DevOps now
+> owns the full pipeline. GitHub (`github` remote) is optional, a plain mirror.
 
 ---
 
@@ -40,7 +48,7 @@ agent never builds images.
 | [6. Hardening roadmap](#6-hardening-roadmap) · [7. File map](#7-file-map) | Reference |
 
 The bring-up in §3 is **ordered and gated** — each step assumes the previous one
-passed. Do not automate CD (§3.5) before the manual deploy (§3.3) works.
+passed. Do not automate the pipeline (§3.5) before the manual deploy (§3.3) works.
 
 ---
 
@@ -63,12 +71,12 @@ node IP.
 ## 2. Prerequisites
 
 - [ ] kubeadm cluster up; `kubectl get nodes` shows all 3 `Ready`.
-- [ ] `helm` v3 and `kubectl` on the master.
-- [ ] Your own GitHub repo for this code (Actions run there, not in Azure DevOps).
-- [ ] `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` in GitHub Actions secrets.
-- [ ] Azure DevOps org + project (free tier is fine).
+- [ ] On the master (the agent host): `helm` v3, `kubectl`, **and Docker** — the
+      agent now builds images too, so a working Docker daemon is required.
+- [ ] Azure DevOps org + project (free tier is fine) with this repo in Azure Repos.
 - [ ] A public Docker Hub repo `web-app-mern` (or make it private + add an
       `imagePullSecret`, see [Troubleshooting](#troubleshooting)).
+- [ ] A Docker Hub personal access token (Read & Write) for `DOCKERHUB_TOKEN` (§3.5).
 
 ---
 
@@ -104,37 +112,33 @@ The app URL is then `http://mern.local:<INGRESS_NODEPORT>`.
 > health endpoint from the master, use the Host-header form in §5.1, not the
 > `mern.local` name.
 
-### 3.2 First CI build (get images onto Docker Hub)
+### 3.2 Build + push images once, by hand
 
-You push to **two** remotes for two reasons — GitHub runs CI, Azure Repos is what
-CD deploys the chart from. One commit, two pushes:
+Prove the images build and push before wiring the pipeline. On the master (which
+has Docker), with a Docker Hub login (`docker login`):
 
-```powershell
-git remote add github https://github.com/thientr18/MERN-simple-app.git   # once
+```bash
+git clone https://lfglobaltech@dev.azure.com/lfglobaltech/DevOps/_git/MERN-simple-app
+cd MERN-simple-app
+SHA=$(git rev-parse HEAD)
 
-git add -A && git commit -m "describe what changed"
-git push origin side-branch           # Azure Repos — CD reads the chart here
-git push github side-branch:main      # your GitHub → triggers CI on main
+docker build -t <DOCKERHUB_USERNAME>/web-app-mern:backend-$SHA  -f Dockerfile .
+docker build -t <DOCKERHUB_USERNAME>/web-app-mern:frontend-$SHA -f client/Dockerfile client
+docker push <DOCKERHUB_USERNAME>/web-app-mern:backend-$SHA
+docker push <DOCKERHUB_USERNAME>/web-app-mern:frontend-$SHA
 ```
 
-Then confirm CI is green: GitHub repo → **Actions** → `Security Check` →
-`Build and Push Images`. The tags should appear on Docker Hub:
-```
-<DOCKERHUB_USERNAME>/web-app-mern:backend-<sha>
-<DOCKERHUB_USERNAME>/web-app-mern:frontend-<sha>   (+ *-latest)
-```
-Note the `<sha>` (the pushed commit) — that's the tag you deploy next.
+Confirm both tags appear on Docker Hub. Note the `<sha>` — that's the tag you
+deploy next. (This is exactly what the pipeline's **Build & push** stage
+automates later.)
 
 ### 3.3 Manual Helm deploy — prove it by hand ⛔ (gate)
 
 Before automating anything, deploy once by hand using the **same values file the
-pipeline uses**, just rendered locally. Run on the master (clone the repo there
-once):
+pipeline uses**, just rendered locally. On the master:
 
 ```bash
-git clone https://github.com/thientr18/MERN-simple-app.git && cd MERN-simple-app
-
-# render the tokenized values (exactly what the CD pipeline does)
+# render the tokenized values (exactly what the Deploy stage does)
 sed -e "s|__crServer__|<DOCKERHUB_USERNAME>|g" \
     -e "s|__IMAGE_TAG__|<sha>|g" \
     -e "s|__ingressHost__|mern.local|g" \
@@ -148,12 +152,12 @@ Verify (see §5.1 for the health check), then open
 `http://mern.local:<INGRESS_NODEPORT>` from your Windows host → register → login →
 dashboard. That confirms the whole path: **frontend → ingress → backend → MongoDB.**
 
-> **Gate:** do not wire up CD (§3.4–3.5) until this manual deploy works.
+> **Gate:** do not wire up the pipeline (§3.4–3.5) until this manual deploy works.
 
 ### 3.4 Install the Azure DevOps self-hosted agent
 
-The agent runs the CD pipeline on your network. It is **deploy-only**, so it needs
-`helm` + `kubectl` + a kubeconfig — no Docker.
+The agent runs the **entire** pipeline on your network, so it needs
+`docker` + `helm` + `kubectl` + a kubeconfig.
 
 **In Azure DevOps:** Project settings → Agent pools → **Add pool** → Self-hosted →
 name **`vbox-k8s`**. Create a PAT (User settings → PAT → scope **Agent Pools
@@ -161,6 +165,11 @@ name **`vbox-k8s`**. Create a PAT (User settings → PAT → scope **Agent Pools
 
 **On the master** (`192.168.100.233`):
 ```bash
+# docker (build stage) — install if not already present, and let the agent user
+# run it without sudo:
+#   sudo apt-get install -y docker.io && sudo usermod -aG docker "$USER"   # re-login after
+docker version    # must succeed as the agent user, no sudo
+
 # helm (kubectl already present from kubeadm)
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
@@ -178,67 +187,58 @@ sudo ./svc.sh install && sudo ./svc.sh start
 ```
 Verify: Agent pools → `vbox-k8s` shows the agent **Online**.
 
-### 3.5 Create the CD pipeline + variable group
+> If Docker was installed *after* the agent service started, restart the agent
+> (`sudo ./svc.sh stop && sudo ./svc.sh start`) so it picks up the new `docker`
+> group membership — otherwise the build stage hits "permission denied" on the
+> Docker socket.
 
-**Variable group** (Pipelines → Library → **+ Variable group** → **`mern-app-dev`**)
-— non-secret config only:
+### 3.5 Variable group + pipeline
+
+**1. Variable group** — Pipelines → Library → + Variable group. Name: `mern-app-dev`.
+
+Variables (🔒 off):
 
 | Variable | Value |
 |---|---|
-| `CR_SERVER` | `<DOCKERHUB_USERNAME>` |
+| `CR_SERVER` | Docker Hub username, e.g. `thientr18` |
 | `INGRESS_HOST` | `mern.local` |
 
-**Pipeline** (Pipelines → New pipeline → **Azure Repos Git** → your
-`MERN-simple-app` repo → branch **`side-branch`** → *Existing YAML* →
-`azure-pipelines/pipelines.deployment.mern-app.yaml`).
+Secrets (🔒 on):
 
-> The CD pipeline reads the chart from **Azure Repos, branch `side-branch`** —
-> that's your source of truth in ADO. GitHub stays CI-only (`main`). The agent
-> checks out Azure Repos with its built-in token, so no GitHub service connection
-> is needed on the CD side. Keep both remotes in sync (one commit, two pushes).
+| Variable | Value |
+|---|---|
+| `DOCKERHUB_TOKEN` | Docker Hub PAT (Read & Write) |
 
-The pipeline has `trigger: none`, so it won't auto-run. Do **one** manual run
-(Run pipeline → branch `side-branch`, `imageTag=latest`) to register it and
-approve the pool / variable-group permission prompts. Then grab the **pipeline id**
-from its URL (`...?definitionId=NN`) — that `NN` is your `AZDO_PIPELINE_ID` below.
+> App secrets `JWT_SECRET` / `MONGO_URI` are not here — they live in the k8s Secret
+> `mern-app-secrets` (§3.1).
 
-### 3.6 Wire the CI → CD handoff
-
-GitHub repo → **Settings → Secrets and variables → Actions**:
-
-| Name | Kind | Value |
-|---|---|---|
-| `AZDO_PAT` | secret | Azure DevOps PAT, scope **Build (Read & execute)** |
-| `AZDO_ORG_URL` | variable | `https://dev.azure.com/<org>` |
-| `AZDO_PROJECT` | variable | your project name |
-| `AZDO_PIPELINE_ID` | variable | `NN` from §3.5 |
-| `AZDO_PIPELINE_BRANCH` | variable | `refs/heads/side-branch` — the ADO repo branch CD reads (NOT GitHub's `main`) |
-
-Now workflow `03-trigger-azure-cd` can queue the CD pipeline with the built
-`<sha>`, checking out the chart from `side-branch`. **Bring-up is complete.**
+**2. Pipeline** — Pipelines → New pipeline → Azure Repos Git → `MERN-simple-app`
+→ branch `side-branch` → Existing YAML → `/azure-pipelines.yml`. Run once manually
+to authorize the pool + variable group. Every push to `main` / `side-branch` then
+runs it. **Bring-up complete.**
 
 ---
 
 ## 4. Everyday workflow (the loop)
 
-Once §3 is done, every change is just: **commit once → push to both remotes.**
+Once §3 is done, every change is a **single push to Azure Repos**:
 
 ```powershell
 git add -A && git commit -m "describe what changed"
-git push origin side-branch           # Azure Repos (chart source for CD)
-git push github side-branch:main      # GitHub → starts CI → CD
+git push origin side-branch           # Azure Repos → triggers the pipeline
 ```
 
-What then happens automatically:
-1. **GitHub Actions:** `Security Check` → `Build and Push Images` (`backend-<sha>`,
-   `frontend-<sha>`) → `Trigger Azure CD` (REST call, passes `imageTag=<sha>`).
-2. **Azure DevOps:** the CD pipeline runs on the `vbox-k8s` agent and
-   `helm upgrade`s to the exact `<sha>` image.
-3. **You verify** (§5.1).
+What then happens automatically, all in Azure DevOps:
+1. **Security check** — backend `npm audit`, frontend lint + build.
+2. **Build & push** — `backend-<sha>` / `frontend-<sha>` to Docker Hub.
+3. **Deploy** — `helm upgrade` to the exact `<sha>` image on the `vbox-k8s` agent.
+4. **You verify** (§5.1).
 
-That's the whole loop: **push → CI builds → CD deploys the exact image.** Keeping
-the two remotes on the same commit is what guarantees the chart on Azure and the
-image built from GitHub describe the same code
+That's the whole loop: **push → security → build → deploy the exact image.**
+
+> **Mirroring to GitHub is optional now.** GitHub Actions were removed, so
+> `git push github side-branch:main` only updates a mirror; it no longer runs any
+> CI. Skip it unless you want the mirror.
 
 ---
 
@@ -274,8 +274,8 @@ lets you target the node IP while still presenting the hostname ingress expects.
 helm history mern-app -n mern-app                     # pick the last good REVISION
 helm rollback mern-app <REVISION> -n mern-app --wait
 ```
-Or re-run the CD pipeline manually with `imageTag=<older-sha>` (that image is still
-on Docker Hub). Note: rolling back to the revision that is already `deployed` is a
+Or re-run the pipeline manually against an older commit (that image is still on
+Docker Hub). Note: rolling back to the revision that is already `deployed` is a
 no-op that just creates an identical new revision.
 
 ### 5.3 Troubleshooting
@@ -283,14 +283,14 @@ no-op that just creates an identical new revision.
 | Symptom | Fix |
 |---|---|
 | `curl: (6) Could not resolve host: mern.local` on the master | Expected — the master has no hosts entry. Use `curl -H 'Host: mern.local' http://192.168.100.231:<INGRESS_NODEPORT>/api/v1/health` (§5.1). **Not** an app failure. |
-| CI job "waiting" / never runs | GitHub default branch must be `main`; workflows trigger there |
-| Build 02 fails on secrets | `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` missing or wrong |
-| CD "waiting for agent" | agent offline (`sudo ./svc.sh status`) or pool name ≠ `vbox-k8s` |
-| Pipeline: "Secret mern-app-secrets missing" | run §3.1 (create the Secret) before deploying |
+| Pipeline "waiting for agent" | agent offline (`sudo ./svc.sh status`) or pool name ≠ `vbox-k8s` |
+| Build stage: `permission denied … /var/run/docker.sock` | agent user not in the `docker` group, or agent started before Docker install — add the user and restart the agent (§3.4) |
+| Build stage: auth / `denied: requested access` | `DOCKERHUB_TOKEN` wrong/expired, or `CR_SERVER` ≠ your Docker Hub username |
+| Deploy stage: "Secret mern-app-secrets missing" | run §3.1 (create the Secret) before deploying |
 | `ImagePullBackOff` | image tag not on Docker Hub, or private repo without an `imagePullSecret` (`kubectl create secret docker-registry regcred -n mern-app --docker-username=... --docker-password=...`, then set `backend.imagePullSecrets` / `frontend.imagePullSecrets`) |
 | backend `CrashLoopBackOff` | `kubectl logs -n mern-app deploy/mern-app-backend` — usually a bad `MONGO_URI` |
 | `http://mern.local:<port>` unreachable | wrong NodePort/IP, hosts entry missing, or ingress-nginx pods not Running |
-| Unreplaced-tokens error in CD | a variable is missing from `mern-app-dev` |
+| Deploy stage: unreplaced-tokens error | a variable is missing from `mern-app-dev` (`CR_SERVER` / `INGRESS_HOST`) |
 | Mongo data lost after reschedule | `emptyDir` is ephemeral — use a PVC or external Mongo/Atlas |
 
 Debug order: pipeline log → `kubectl get pods -n mern-app` →
@@ -305,7 +305,12 @@ Debug order: pipeline log → `kubectl get pods -n mern-app` →
 - **TLS:** install cert-manager, set `ingress.tlsSecret` + `ingress.clusterIssuer`.
 - **Clean host access:** install MetalLB with a pool in `192.168.100.0/24` so
   ingress-nginx gets a real LB IP and you can drop the `:<NodePort>`.
-- **Prod environment:** a second variable group + pipeline stage with approvals.
+- **Prod environment:** scope config per environment — keep `mern-app-dev` for
+  dev and add a `mern-app-prod` variable group (same keys, prod values), selected
+  by stage. Gate the prod Deploy behind an Azure DevOps *Environment* with a
+  required-approval check, so a human signs off before it ships.
+- **Image scanning:** add a Trivy step to the Security stage to fail on
+  HIGH/CRITICAL CVEs in the built images.
 
 ---
 
@@ -313,10 +318,7 @@ Debug order: pipeline log → `kubectl get pods -n mern-app` →
 
 | File | Role |
 |---|---|
-| `.github/workflows/01-security_check.yml` | CI: audit + lint/build |
-| `.github/workflows/02-build-push-docker.yml` | CI: build + push images |
-| `.github/workflows/03-trigger-azure-cd.yml` | CI→CD handoff (REST call) |
-| `azure-pipelines/pipelines.deployment.mern-app.yaml` | CD: deploy only, `trigger: none` |
-| `k8s-helm/mern-app/values.tokenized.yaml` | CD values (tokens filled by pipeline) |
+| `azure-pipelines.yml` | The full CI/CD pipeline: Security → Build & push → Deploy |
+| `k8s-helm/mern-app/values.tokenized.yaml` | Deploy values (tokens filled by the pipeline) |
 | `k8s-helm/mern-app/values.local.yaml` | optional single-node local testing |
 | `k8s-helm/mern-app/` | chart: backend + frontend + mongodb + ingress |

@@ -1,0 +1,169 @@
+name: MERN CICD - $(Build.BuildId)
+
+trigger:
+  branches:
+    include:
+      - main
+      - side-branch
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+
+pr: none
+
+parameters:
+  - name: AgentPool
+    type: string
+    default: 'vbox-k8s'
+  - name: ServiceName
+    type: string
+    default: 'mern-app'
+  - name: Namespace
+    type: string
+    default: 'mern-app'
+
+variables:
+  - group: mern-app-dev                      # CR_SERVER, INGRESS_HOST, DOCKERHUB_TOKEN (secret)
+  - name: imageRepository
+    value: 'web-app-mern'
+  - name: imageTag
+    value: '$(Build.SourceVersion)'          # git SHA — same tag scheme as old CI
+  - name: helmChartPath
+    value: 'k8s-helm/mern-app'
+  - name: valuesTokenized
+    value: 'k8s-helm/mern-app/values.tokenized.yaml'
+
+stages:
+  # ------------------------------------------------------------------ Security
+  - stage: Security
+    displayName: Security check
+    jobs:
+      - job: backend_audit
+        displayName: Backend security audit
+        pool:
+          name: ${{ parameters.AgentPool }}
+        steps:
+          - checkout: self
+          - task: NodeTool@0
+            displayName: Use Node 18
+            inputs:
+              versionSpec: '18.x'
+          - script: npm ci
+            displayName: Install backend deps
+          - script: npm audit --audit-level=high
+            displayName: npm audit (high)
+
+      - job: frontend_lint_build
+        displayName: Frontend lint and build
+        pool:
+          name: ${{ parameters.AgentPool }}
+        steps:
+          - checkout: self
+          - task: NodeTool@0
+            displayName: Use Node 18
+            inputs:
+              versionSpec: '18.x'
+          - script: npm ci
+            workingDirectory: client
+            displayName: Install frontend deps
+          - script: npm run lint
+            workingDirectory: client
+            displayName: Lint frontend
+          - script: npm run build
+            workingDirectory: client
+            displayName: Build frontend
+
+  # --------------------------------------------------------------- Build & push
+  - stage: BuildPush
+    displayName: Build & push images
+    dependsOn: Security                       # implicit condition: succeeded()
+    jobs:
+      - job: build_push
+        displayName: Build & push backend + frontend
+        pool:
+          name: ${{ parameters.AgentPool }}
+        steps:
+          - checkout: self
+
+          # Log in with the DOCKERHUB_TOKEN secret variable from the group. Map it
+          # via env: (not $(...) macro) so the token stays off the command line.
+          - script: echo "$DOCKERHUB_TOKEN" | docker login -u "$(CR_SERVER)" --password-stdin
+            displayName: Docker Hub login
+            env:
+              DOCKERHUB_TOKEN: $(DOCKERHUB_TOKEN)
+
+          - script: |
+              set -euo pipefail
+              IMG="$(CR_SERVER)/$(imageRepository)"
+              docker build -t "$IMG:backend-$(imageTag)" -t "$IMG:backend-latest" -f Dockerfile .
+              docker push "$IMG:backend-$(imageTag)"
+              docker push "$IMG:backend-latest"
+            displayName: Build & push backend
+
+          - script: |
+              set -euo pipefail
+              IMG="$(CR_SERVER)/$(imageRepository)"
+              docker build -t "$IMG:frontend-$(imageTag)" -t "$IMG:frontend-latest" -f client/Dockerfile client
+              docker push "$IMG:frontend-$(imageTag)"
+              docker push "$IMG:frontend-latest"
+            displayName: Build & push frontend
+
+          - script: docker logout
+            displayName: Docker Hub logout
+            condition: always()
+
+  # -------------------------------------------------------------------- Deploy
+  - stage: Deploy
+    displayName: Helm deploy
+    dependsOn: BuildPush                       # implicit condition: succeeded()
+    jobs:
+      - job: HelmDeploy
+        pool:
+          name: ${{ parameters.AgentPool }}
+        steps:
+          - checkout: self
+            clean: true
+
+          - bash: |
+              set -euo pipefail
+              echo "Deploying imageTag=$(imageTag)"
+            displayName: Show target image tag
+
+          - bash: |
+              set -euo pipefail
+              OUT="$(Build.ArtifactStagingDirectory)/values.generated.yaml"
+              sed -e "s|__crServer__|$(CR_SERVER)|g" \
+                  -e "s|__IMAGE_TAG__|$(imageTag)|g" \
+                  -e "s|__ingressHost__|$(INGRESS_HOST)|g" \
+                  "$(valuesTokenized)" > "$OUT"
+              if grep -nE '__[A-Za-z0-9_]+__' "$OUT"; then
+                echo "##[error]Unreplaced tokens remain (see above)."; exit 1
+              fi
+            displayName: Render values (non-secret tokens)
+
+          - bash: |
+              set -euo pipefail
+              NS="${{ parameters.Namespace }}"
+              # secretKeyRef: pods can't start without this Secret. Fail fast
+              # rather than wait out a 5-minute helm timeout.
+              if ! kubectl get secret mern-app-secrets -n "$NS" >/dev/null 2>&1; then
+                echo "##[error]Secret 'mern-app-secrets' missing in namespace '$NS' — create it first (see README §3.1)."
+                exit 1
+              fi
+            displayName: Pre-check k8s Secret
+
+          - bash: |
+              set -euo pipefail
+              VALUES="$(Build.ArtifactStagingDirectory)/values.generated.yaml"
+              helm lint "$(helmChartPath)" -f "$VALUES"
+              helm upgrade --install "${{ parameters.ServiceName }}" "$(helmChartPath)" \
+                --namespace "${{ parameters.Namespace }}" --create-namespace \
+                -f "$VALUES" --history-max 5 --wait --timeout 5m
+              kubectl get pods -n "${{ parameters.Namespace }}" \
+                -l app.kubernetes.io/instance=${{ parameters.ServiceName }} -o wide
+            displayName: helm upgrade --install
+
+          - bash: rm -f "$(Build.ArtifactStagingDirectory)/values.generated.yaml"
+            displayName: Clean up rendered values
+            condition: always()
