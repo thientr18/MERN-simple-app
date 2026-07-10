@@ -284,6 +284,7 @@ no-op that just creates an identical new revision.
 |---|---|
 | `curl: (6) Could not resolve host: mern.local` on the master | Expected — the master has no hosts entry. Use `curl -H 'Host: mern.local' http://192.168.100.231:<INGRESS_NODEPORT>/api/v1/health` (§5.1). **Not** an app failure. |
 | Pipeline "waiting for agent" | agent offline (`sudo ./svc.sh status`) or pool name ≠ `vbox-k8s` |
+| Build stage: `docker: command not found` (exit 127) | Docker not installed on the agent — `sudo apt-get install -y docker.io`, then **restart the agent** (§3.4) |
 | Build stage: `permission denied … /var/run/docker.sock` | agent user not in the `docker` group, or agent started before Docker install — add the user and restart the agent (§3.4) |
 | Build stage: auth / `denied: requested access` | `DOCKERHUB_TOKEN` wrong/expired, or `CR_SERVER` ≠ your Docker Hub username |
 | Deploy stage: "Secret mern-app-secrets missing" | run §3.1 (create the Secret) before deploying |
