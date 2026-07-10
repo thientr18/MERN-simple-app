@@ -66,7 +66,7 @@ ingress host `mern-app.deploy`, image repo `<DOCKERHUB_USERNAME>/web-app-mern`. 
 ingress starts out exposed as a **NodePort** (bare-metal cluster, no cloud LB) —
 that port is written as `<INGRESS_NODEPORT>` below (e.g. `30080`) and is reachable
 on **any** node IP. §6.1 later upgrades it to a MetalLB **LoadBalancer** at
-`192.168.100.240`, after which the port-free `http://mern-app.deploy/` is the
+`192.168.100.248`, after which the port-free `http://mern-app.deploy/` is the
 primary URL (the NodePort keeps working as a fallback).
 
 ---
@@ -112,13 +112,14 @@ kubectl -n ingress-nginx get svc ingress-nginx-controller   # http now shows 80:
 apiserver's `--service-node-port-range`. To drop the `:<port>` from the URL
 entirely, install MetalLB instead (see [§6.1](#61-drop-the-port-with-metallb)).
 
-**Namespace + app Secret** (holds `JWT_SECRET` and `MONGO_URI`):
+**Namespace**:
 ```bash
 kubectl create namespace mern-app
-kubectl create secret generic mern-app-secrets -n mern-app \
-  --from-literal=JWT_SECRET="$(openssl rand -hex 24)" \
-  --from-literal=MONGO_URI='mongodb://mern-app-mongodb:27017/mern-app'
 ```
+> No manual app Secret anymore: the **chart renders `mern-app-secrets` itself**
+> (`templates/secret.yaml`) from values injected at deploy time — the pipeline
+> takes `JWT_SECRET` / `MONGO_URI` from the variable group (§3.5); the manual
+> gate deploy passes them by hand (§3.3). Design details: §6.3.
 
 **Image pull Secret** — the Docker Hub repo is **private**, so the nodes need
 credentials to pull it:
@@ -178,8 +179,15 @@ sed -e "s|__crServer__|<DOCKERHUB_USERNAME>|g" \
     k8s-helm/mern-app/values.tokenized.yaml > /tmp/values.yaml
 
 helm upgrade --install mern-app k8s-helm/mern-app \
-  -n mern-app -f /tmp/values.yaml --wait --timeout 5m
+  -n mern-app -f /tmp/values.yaml \
+  --set-string secrets.jwtSecret="$(openssl rand -hex 24)" \
+  --set-string secrets.mongoUri='mongodb://mern-app-mongodb:27017/mern-app' \
+  --wait --timeout 5m
 ```
+
+> The two `--set-string` flags feed `templates/secret.yaml`, which renders the
+> `mern-app-secrets` Secret (§6.3). Use the **same** JWT value you'll later put
+> in the variable group, or every deploy that changes it logs users out.
 
 Verify (see §5.1 for the health check), then open
 `http://mern-app.deploy:<INGRESS_NODEPORT>` from your Windows host → register → login →
@@ -241,13 +249,16 @@ Secrets (🔒 on):
 | Variable | Value |
 |---|---|
 | `DOCKERHUB_TOKEN` | Docker Hub PAT (Read & Write) |
+| `JWT_SECRET` | the value used in §3.3 (e.g. output of `openssl rand -hex 24`) |
+| `MONGO_URI` | `mongodb://mern-app-mongodb:27017/mern-app` |
 
 > `DOCKERHUB_TOKEN` is used twice: **Build & push** logs in to push the private
 > repo, and **Deploy** recreates the `regcred` pull Secret from it so the
 > cluster can pull. Rotate the PAT here and the next deploy updates the cluster.
 >
-> App secrets `JWT_SECRET` / `MONGO_URI` are not here — they live in the k8s Secret
-> `mern-app-secrets` (§3.1).
+> `JWT_SECRET` / `MONGO_URI` feed the Helm-rendered `mern-app-secrets` Secret
+> (§6.3) — rotate them here and the next deploy updates the cluster the same
+> way. Rotating `JWT_SECRET` logs every user out (tokens no longer verify).
 
 **2. Pipeline** — Pipelines → New pipeline → Azure Repos Git → `MERN-simple-app`
 → branch `side-branch` → Existing YAML → `/azure-pipelines.yml`. Run once manually
@@ -297,7 +308,7 @@ curl -H 'Host: mern-app.deploy' http://192.168.100.231:<INGRESS_NODEPORT>/api/v1
 # → {"status":"UP","message":"Server is healthy"}
 
 # after §6.1 (MetalLB): same check, port-free, via the VIP
-curl -H 'Host: mern-app.deploy' http://192.168.100.240/api/v1/health
+curl -H 'Host: mern-app.deploy' http://192.168.100.248/api/v1/health
 ```
 
 > **From your Windows host** (which *does* have the hosts entry from §3.1) just use
@@ -328,12 +339,15 @@ no-op that just creates an identical new revision.
 | Build stage: `docker: command not found` (exit 127) | Docker not installed on the agent — `sudo apt-get install -y docker.io`, then **restart the agent** (§3.4) |
 | Build stage: `permission denied … /var/run/docker.sock` | agent user not in the `docker` group, or agent started before Docker install — add the user and restart the agent (§3.4) |
 | Build stage: auth / `denied: requested access` | `DOCKERHUB_TOKEN` wrong/expired, or `CR_SERVER` ≠ your Docker Hub username |
-| Deploy stage: "Secret mern-app-secrets missing" | run §3.1 (create the Secret) before deploying |
+| Deploy stage: "JWT_SECRET is missing" / helm `secrets.jwtSecret is required` | add `JWT_SECRET` + `MONGO_URI` as **secret** variables to `mern-app-dev` (§3.5) — the chart renders the Secret from them (§6.3) |
 | `ImagePullBackOff` | image tag not on Docker Hub, or `regcred` stale/missing (pull error says `unauthorized`). The Deploy stage recreates `regcred` each run — re-run the pipeline with a valid `DOCKERHUB_TOKEN`, or recreate it by hand (§3.1). Check with `kubectl describe pod <pod> -n mern-app` |
 | backend `CrashLoopBackOff` | `kubectl logs -n mern-app deploy/mern-app-backend` — usually a bad `MONGO_URI` |
 | `http://mern-app.deploy:<port>` unreachable | wrong NodePort/IP, hosts entry missing, or ingress-nginx pods not Running |
+| VIP URL works from one machine, 404/hangs from another | ARP conflict — another LAN device owns the VIP. Compare `arp -a` / `ip neigh show <VIP>` MACs against the nodes' `08:00:27:*`; foreign MAC → move the VIP (§6.1 notes) |
+| 404 from nginx on a URL that should exist | Host header ≠ the ingress rule's host — `kubectl get ingress -n mern-app` and make browser URL / hosts entry / `INGRESS_HOST` all match |
 | Deploy stage: unreplaced-tokens error | a variable is missing from `mern-app-dev` (`CR_SERVER` / `INGRESS_HOST`) |
-| Mongo data lost after reschedule | `emptyDir` is ephemeral — use a PVC or external Mongo/Atlas |
+| Mongo data lost after reschedule | fixed in §6.2 (PVC) — if it still happens, `kubectl get pvc -n mern-app` must show `Bound`, and the mongo deployment must mount it (not an `emptyDir`) |
+| Mongo PVC stuck `Pending` | no StorageClass — install the local-path provisioner (§6.2, step 1) |
 
 Debug order: pipeline log → `kubectl get pods -n mern-app` →
 `kubectl describe pod <pod> -n mern-app` → `kubectl logs <pod> -n mern-app`.
@@ -342,8 +356,9 @@ Debug order: pipeline log → `kubectl get pods -n mern-app` →
 
 ## 6. Hardening roadmap
 
-- **Persistent Mongo:** replace the `emptyDir` in `values.tokenized.yaml` with a
-  PersistentVolumeClaim, or point `MONGO_URI` at MongoDB Atlas.
+- **Persistent Mongo:** done in §6.2 — local-path provisioner + PVC. For real
+  HA, move to MongoDB Atlas instead (`mongodb.enabled: false`, repoint
+  `MONGO_URI` in the Secret).
 - **TLS:** install cert-manager, set `ingress.tlsSecret` + `ingress.clusterIssuer`.
 - **Clean host access:** install MetalLB so ingress-nginx gets a real LB IP and
   the `:<NodePort>` disappears from the URL — full flow in §6.1 below.
@@ -370,7 +385,7 @@ to the ingress controller.
 
 ```mermaid
 flowchart LR
-    B["browser<br/>http://mern-app.deploy/"] -->|"hosts file:<br/>mern-app.deploy → 192.168.100.240"| V["MetalLB VIP<br/>192.168.100.240:80"]
+    B["browser<br/>http://mern-app.deploy/"] -->|"hosts file:<br/>mern-app.deploy → 192.168.100.248"| V["MetalLB VIP<br/>192.168.100.248:80"]
     V --> C["ingress-nginx<br/>(now LoadBalancer)"]
     C -->|"Host: mern-app.deploy"| R["ingress rules"]
     R --> FE["frontend svc  /"]
@@ -389,8 +404,12 @@ kubectl -n metallb-system wait --for=condition=Ready pod --all --timeout=120s
 
 **2. Give MetalLB a pool of spare IPs** on the node subnet
 (`192.168.100.0/24`, same L2 as the nodes' `enp0s3`). The addresses must be
-unused and outside any DHCP scope — check first (`ping -c1 192.168.100.240`
-should get no reply):
+genuinely free: outside the router's DHCP scope, not in any other machine's
+LB pool (another k8s cluster on the LAN!), and silent when pinged **from both
+the master and your Windows host** (`ping 192.168.100.248` → no reply on
+either). A reply from *anywhere* means the IP is taken — pick another. This
+LAN's `.240` turned out to be owned by another device, which is why the pool
+starts at `.245`:
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: metallb.io/v1beta1
@@ -400,7 +419,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-    - 192.168.100.240-192.168.100.250
+    - 192.168.100.245-192.168.100.250
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
@@ -417,11 +436,11 @@ EOF
 it never changes:
 ```bash
 kubectl -n ingress-nginx annotate svc ingress-nginx-controller \
-  metallb.universe.tf/loadBalancerIPs=192.168.100.240
+  metallb.universe.tf/loadBalancerIPs=192.168.100.248
 kubectl -n ingress-nginx patch svc ingress-nginx-controller \
   -p '{"spec":{"type":"LoadBalancer"}}'
 kubectl -n ingress-nginx get svc ingress-nginx-controller
-# EXTERNAL-IP must show 192.168.100.240 — if it stays <pending>, the
+# EXTERNAL-IP must show 192.168.100.248 — if it stays <pending>, the
 # IPAddressPool / L2Advertisement from step 2 is wrong
 ```
 
@@ -433,13 +452,13 @@ chart change needed — the ingress simply routes the new Host header.
 **5. Hosts entry on the Windows host** — point the domain at the **VIP**, not
 at a node IP as before:
 ```
-192.168.100.240  mern-app.deploy
+192.168.100.248  mern-app.deploy
 ```
 
 **Verify** (port 80 is implied everywhere now):
 ```bash
 # from the master (no hosts entry → send the Host header):
-curl -H 'Host: mern-app.deploy' http://192.168.100.240/api/v1/health
+curl -H 'Host: mern-app.deploy' http://192.168.100.248/api/v1/health
 ```
 From the Windows host: `http://mern-app.deploy/` → SPA,
 `http://mern-app.deploy/api/v1/health` → `{"status":"UP",...}`.
@@ -447,11 +466,105 @@ From the Windows host: `http://mern-app.deploy/` → SPA,
 Notes:
 - The old `:<NodePort>` URL keeps working — `LoadBalancer` is a superset of
   `NodePort`; the node ports stay allocated.
+- **IP-conflict symptom** (learned the hard way): the app works from one
+  machine but another gets 404s or hangs on the *same* VIP URL → two devices
+  are answering ARP for the VIP. Check `arp -a` (Windows) / `ip neigh show
+  <VIP>` (Linux) on both — the MAC must be one of the VirtualBox nodes
+  (`08:00:27:*`) and identical everywhere. A foreign MAC = conflict: move the
+  VIP to a free address (re-annotate, update hosts file). The NodePort URL
+  (`node-ip:30080`) bypasses the VIP, so it's the quickest way to prove the
+  cluster itself is healthy while ARP is being fought over.
 - `mern-app.deploy` only resolves on machines with the hosts entry. In this
   VirtualBox lab the hosts file *is* your DNS; a real public domain would need
   a registrar + an A record to a routable IP instead.
 - HTTPS later: cert-manager + `ingress.tlsSecret` (roadmap above). With the LB
   also owning 443, `https://mern-app.deploy/` is port-free too.
+
+### 6.2 Persist MongoDB with a PVC
+
+Why data used to vanish: Mongo's volume was an `emptyDir` — scratch space that
+lives and dies with the pod. Any pod recreation (node reboot, eviction, spec
+change) started Mongo from an empty directory. The fix has two halves: the
+**cluster** needs a storage provisioner (kubeadm ships none, so a bare PVC
+would sit `Pending` forever), and the **chart** needs to request a PVC instead
+of an `emptyDir` (done: `templates/pvc.yaml` + `mongodb.persistence` in
+`values.tokenized.yaml`).
+
+**1. Install the local-path provisioner** — one-time, on the master:
+```bash
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.31/deploy/local-path-storage.yaml
+kubectl get storageclass    # "local-path" must appear
+```
+
+**2. Deploy** — the chart change rides the normal pipeline: push → deploy.
+The Deploy stage creates the PVC `mern-app-mongodb-data` (2Gi) once; every
+later deploy reuses it. It carries `helm.sh/resource-policy: keep`, so even
+`helm uninstall` leaves the data alone.
+
+**3. Verify — kill the pod, data must survive:**
+```bash
+kubectl get pvc -n mern-app          # STATUS must be Bound
+# register a user in the app, then force a mongo pod restart:
+kubectl delete pod -n mern-app -l app.kubernetes.io/component=mongodb
+kubectl get pods -n mern-app -w      # wait for the new mongodb pod Running
+# → log in again in the browser: the user is still there
+```
+
+Caveats (lab-grade persistence, not HA):
+- local-path stores the data **on one node's disk** (under
+  `/opt/local-path-provisioner`, on whichever node the pod first schedules).
+  The pod is pinned there from then on; if that node dies, the data is
+  stranded on it. Real HA = MongoDB Atlas or networked storage.
+- Mongo now uses `strategy: Recreate` — a ReadWriteOnce volume can't be
+  mounted by the old and new pod at once during a rolling update.
+- To wipe the data on purpose: `kubectl delete pvc mern-app-mongodb-data -n mern-app`
+  (the PVC survives `helm uninstall` by design).
+
+### 6.3 App secrets from the variable group (Helm-rendered Secret)
+
+Before, `mern-app-secrets` was created **by hand** (`kubectl create secret`,
+old §3.1) — invisible to the pipeline, easy to forget on a fresh cluster, and
+rotation was a manual kubectl exercise. Now the chart owns it, and the values
+live in the `mern-app-dev` variable group next to `DOCKERHUB_TOKEN`.
+
+The Helm concepts in play:
+
+- **Template** — `templates/secret.yaml` renders a `Secret` when
+  `secrets.create` is true, `b64enc`-encoding the values.
+- **Guard** — `required "…" $s.jwtSecret` makes the deploy **fail loudly** if a
+  value wasn't injected, instead of silently creating an empty Secret and
+  letting the backend crash-loop.
+- **Injection** — the pipeline maps the secret variables into env vars and
+  passes them with `--set-file secrets.jwtSecret=<(printf '%s' "$JWT_SECRET")`.
+  `--set-file` takes the value verbatim (no `--set` comma/quote parsing), the
+  process substitution never touches disk, and the value never appears on the
+  command line or in the log.
+- **Scoping** — `values.local.yaml` sets `secrets.create: false`, so the local
+  flow keeps its hand-made Secret and helm won't overwrite it.
+
+The flow end to end:
+
+```mermaid
+flowchart LR
+    VG["mern-app-dev variable group<br/>JWT_SECRET · MONGO_URI (secret)"] -->|"env-mapped in Deploy"| H["helm upgrade<br/>--set-file secrets.*"]
+    H --> T["templates/secret.yaml<br/>(required + b64enc)"]
+    T --> S[("k8s Secret<br/>mern-app-secrets")]
+    S -->|"secretKeyRef"| B["backend pod env"]
+```
+
+Rotation = edit the value in the variable group → run the pipeline. Same
+lifecycle as `regcred`, no kubectl needed.
+
+Caveats:
+- Helm stores deploy-time values (secrets included, base64) in its **release
+  Secret** in-cluster (`sh.helm.release.v1.mern-app.vN`). Same trust domain as
+  the app Secret itself, so nothing is *more* exposed — but anyone with read
+  access to Secrets in the namespace sees both.
+- Rotating `JWT_SECRET` invalidates all issued tokens — every user logs in again.
+- The backend only reads env vars at startup; the pipeline redeploys with a new
+  image tag each commit so pods restart anyway, but a *variable-only* rotation
+  needs a pod restart to take effect (`kubectl rollout restart deploy/mern-app-backend -n mern-app`
+  after the deploy, if the image tag didn't change).
 
 ---
 
@@ -462,4 +575,4 @@ Notes:
 | `azure-pipelines.yml` | The full CI/CD pipeline: Security → Build & push → Deploy |
 | `k8s-helm/mern-app/values.tokenized.yaml` | Deploy values (tokens filled by the pipeline) |
 | `k8s-helm/mern-app/values.local.yaml` | optional single-node local testing |
-| `k8s-helm/mern-app/` | chart: backend + frontend + mongodb + ingress |
+| `k8s-helm/mern-app/` | chart: backend + frontend + mongodb + ingress + PVC (§6.2) + app Secret (§6.3) |

@@ -1,7 +1,17 @@
 # CD values — the pipeline replaces the tokens below, then runs helm upgrade.
 # Tokens (non-secret): __crServer__, __IMAGE_TAG__ (git SHA from CI), __ingressHost__.
-# Secrets are NOT here — JWT_SECRET/MONGO_URI come from the mern-app-secrets
-# k8s Secret (see backend.env). Do not deploy this file directly.
+# Secret VALUES are never in this file or in git: the pipeline injects
+# JWT_SECRET/MONGO_URI from the mern-app-dev variable group at deploy time
+# (helm --set-file), and the chart renders them into the mern-app-secrets
+# Secret (templates/secret.yaml). Do not deploy this file directly.
+
+# The chart owns the mern-app-secrets Secret. Placeholders stay empty here —
+# templates/secret.yaml fails the deploy (required) if they aren't injected.
+secrets:
+  create: true
+  name: mern-app-secrets
+  jwtSecret: ""   # injected by the pipeline (variable group, secret)
+  mongoUri: ""    # injected by the pipeline (variable group, secret)
 
 backend:
   enabled: true
@@ -153,13 +163,27 @@ mongodb:
       cpu: "500m"
       memory: "512Mi"
 
-  # emptyDir = data lost on reschedule (OK for dev/test; use a PVC to persist).
+  # Single replica on a ReadWriteOnce volume: Recreate stops the old pod
+  # before starting the new one, so the volume is never claimed twice.
+  strategy:
+    type: Recreate
+
+  # Data survives pod restarts/reschedules via a PVC (templates/pvc.yaml).
+  # Requires the local-path provisioner on the cluster — see README §6.2.
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 2Gi
+
   volumeMounts:
     - name: data
       mountPath: /data/db
   volumes:
     - name: data
-      emptyDir: {}
+      persistentVolumeClaim:
+        # Must match the PVC name templates/pvc.yaml renders:
+        # <release fullname>-mongodb-data (release "mern-app" → this).
+        claimName: mern-app-mongodb-data
 
 # Single host, path-based routing: the SPA calls the API with relative
 # /api/v1/... URLs, so /api must land on the backend service.

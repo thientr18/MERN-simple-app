@@ -1,5 +1,6 @@
-# Local testing values (no tokens). Same secret model as CD: secrets come from
-# the mern-app-secrets Secret. See ../../README.md §3.3 for the full flow.
+# Local testing values (no tokens). Unlike CD (where the chart renders the
+# mern-app-secrets Secret from pipeline-injected values, see §6.2), the local
+# flow keeps the hand-made Secret below — secrets.create stays false here.
 #
 # One-time setup, then deploy:
 #   kubectl create namespace mern-app
@@ -157,12 +158,19 @@ mongodb:
       cpu: "500m"
       memory: "512Mi"
 
+  # Local testing stays ephemeral on purpose (no provisioner needed).
+  # The CD values use a real PVC instead — see values.tokenized.yaml + README §6.2.
   volumeMounts:
     - name: data
       mountPath: /data/db
   volumes:
     - name: data
       emptyDir: {}
+
+# Keep using the manually created mern-app-secrets Secret (header above) —
+# the chart must not create/overwrite it in the local flow.
+secrets:
+  create: false
 
 ingress:
   enabled: true

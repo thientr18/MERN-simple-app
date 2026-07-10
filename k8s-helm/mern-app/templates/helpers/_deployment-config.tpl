@@ -8,6 +8,10 @@ metadata:
 spec:
   replicas: {{ .config.replicaCount | default 1 }}
   revisionHistoryLimit: {{ .config.revisionHistoryLimit | default 3 }}
+  {{- with .config.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "mern-app.selectorLabels" . | nindent 6 }}

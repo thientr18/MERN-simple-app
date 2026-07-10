@@ -23,8 +23,9 @@ parameters:
     default: 'mern-app'
 
 variables:
-  - group: mern-app-dev                      # CR_SERVER, INGRESS_HOST, DOCKERHUB_TOKEN (secret;
-                                             # pushes in BuildPush + refreshes regcred in Deploy)
+  - group: mern-app-dev                      # CR_SERVER, INGRESS_HOST + secrets: DOCKERHUB_TOKEN
+                                             # (push + regcred), JWT_SECRET, MONGO_URI (rendered
+                                             # into the mern-app-secrets Secret by the chart)
   - name: imageRepository
     value: 'web-app-mern'
   - name: imageTag
@@ -144,14 +145,21 @@ stages:
 
           - bash: |
               set -euo pipefail
-              NS="${{ parameters.Namespace }}"
-              # secretKeyRef: pods can't start without this Secret. Fail fast
-              # rather than wait out a 5-minute helm timeout.
-              if ! kubectl get secret mern-app-secrets -n "$NS" >/dev/null 2>&1; then
-                echo "##[error]Secret 'mern-app-secrets' missing in namespace '$NS' — create it first (see README §3.1)."
-                exit 1
-              fi
-            displayName: Pre-check k8s Secret
+              # The chart renders mern-app-secrets from these two values. Fail
+              # fast with a clear message instead of a cryptic helm error. An
+              # unset ADO variable arrives as the literal macro text, so check
+              # for that too.
+              for v in JWT_SECRET MONGO_URI; do
+                val="$(printenv "$v" || true)"
+                if [ -z "$val" ] || [ "$val" = "\$($v)" ]; then
+                  echo "##[error]$v is missing — add it as a SECRET variable to the mern-app-dev variable group (README §3.5)."
+                  exit 1
+                fi
+              done
+            displayName: Pre-check secret variables
+            env:
+              JWT_SECRET: $(JWT_SECRET)
+              MONGO_URI: $(MONGO_URI)
 
           - bash: |
               set -euo pipefail
@@ -169,13 +177,26 @@ stages:
           - bash: |
               set -euo pipefail
               VALUES="$(Build.ArtifactStagingDirectory)/values.generated.yaml"
-              helm lint "$(helmChartPath)" -f "$VALUES"
+              # lint needs non-empty secret values (templates/secret.yaml uses
+              # `required`) — dummies are fine, lint never touches the cluster.
+              helm lint "$(helmChartPath)" -f "$VALUES" \
+                --set-string secrets.jwtSecret=lint-only \
+                --set-string secrets.mongoUri=lint-only
+              # Real secrets ride in via --set-file + process substitution:
+              # taken verbatim (no --set comma/quote parsing), never on the
+              # command line, never written to disk.
               helm upgrade --install "${{ parameters.ServiceName }}" "$(helmChartPath)" \
                 --namespace "${{ parameters.Namespace }}" --create-namespace \
-                -f "$VALUES" --history-max 5 --wait --timeout 5m
+                -f "$VALUES" \
+                --set-file secrets.jwtSecret=<(printf '%s' "$JWT_SECRET") \
+                --set-file secrets.mongoUri=<(printf '%s' "$MONGO_URI") \
+                --history-max 5 --wait --timeout 5m
               kubectl get pods -n "${{ parameters.Namespace }}" \
                 -l app.kubernetes.io/instance=${{ parameters.ServiceName }} -o wide
             displayName: helm upgrade --install
+            env:
+              JWT_SECRET: $(JWT_SECRET)
+              MONGO_URI: $(MONGO_URI)
 
           - bash: rm -f "$(Build.ArtifactStagingDirectory)/values.generated.yaml"
             displayName: Clean up rendered values

@@ -1,0 +1,26 @@
+{{- $components := list "backend" "frontend" "mongodb" -}}
+{{- range $name := $components }}
+{{- $config := index $.Values $name -}}
+{{- if and $config $config.enabled $config.persistence $config.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mern-app.fullname" $ }}-{{ $name }}-data
+  labels:
+    {{- include "mern-app.labels" (dict "Values" $.Values "Release" $.Release "Chart" $.Chart "name" $name) | nindent 4 }}
+  annotations:
+    # Survive `helm uninstall` — the data outlives the release; delete the PVC
+    # manually if you really want it gone.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ $config.persistence.accessMode | default "ReadWriteOnce" }}
+  {{- with $config.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $config.persistence.size | default "2Gi" }}
+{{- end }}
+{{- end }}
