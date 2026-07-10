@@ -16,5 +16,7 @@ module.exports = {
       'warn',
       { allowConstantExport: true },
     ],
+    // This project does not use PropTypes for runtime prop validation.
+    'react/prop-types': 'off',
   },
 }
