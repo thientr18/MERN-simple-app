@@ -9,6 +9,8 @@ module.exports = {
   ],
   ignorePatterns: ['dist', '.eslintrc.cjs'],
   parserOptions: { ecmaVersion: 'latest', sourceType: 'module' },
+  // Injected at build time via Vite `define`
+  globals: { __BUILD_TIME__: 'readonly' },
   settings: { react: { version: '18.2' } },
   plugins: ['react-refresh'],
   rules: {
