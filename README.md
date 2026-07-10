@@ -125,9 +125,6 @@ Then confirm CI is green: GitHub repo → **Actions** → `Security Check` →
 ```
 Note the `<sha>` (the pushed commit) — that's the tag you deploy next.
 
-> Full detail on the two-remote model and its gotchas:
-> [docs/git-push-workflow.md](docs/git-push-workflow.md).
-
 ### 3.3 Manual Helm deploy — prove it by hand ⛔ (gate)
 
 Before automating anything, deploy once by hand using the **same values file the
@@ -241,8 +238,7 @@ What then happens automatically:
 
 That's the whole loop: **push → CI builds → CD deploys the exact image.** Keeping
 the two remotes on the same commit is what guarantees the chart on Azure and the
-image built from GitHub describe the same code — see
-[docs/git-push-workflow.md](docs/git-push-workflow.md).
+image built from GitHub describe the same code
 
 ---
 
@@ -324,4 +320,3 @@ Debug order: pipeline log → `kubectl get pods -n mern-app` →
 | `k8s-helm/mern-app/values.tokenized.yaml` | CD values (tokens filled by pipeline) |
 | `k8s-helm/mern-app/values.local.yaml` | optional single-node local testing |
 | `k8s-helm/mern-app/` | chart: backend + frontend + mongodb + ingress |
-| `docs/git-push-workflow.md` | the two-remote git model in detail |
